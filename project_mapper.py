@@ -2,6 +2,7 @@
 """
 Project Mapper: Create a mapping of your Python project’s functions, classes, and interdependencies.
 Outputs a JSON file and (optionally) a Mermaid diagram file.
+Supports two Mermaid modes: "full" (detailed, including function calls) and "summary" (high-level).
 """
 
 import os
@@ -100,11 +101,14 @@ def parse_functions_and_classes(file_path):
     return module_data
 
 
-def generate_mermaid(project_data):
+def generate_mermaid(project_data, mode="full"):
     """
     Generate Mermaid code (graph TD) from the project mapping.
-    Each module, function, class, and method is given a node.
-    Function calls are drawn as edges.
+    
+    Parameters:
+      - project_data: the JSON mapping of the project.
+      - mode: "full" for detailed view (including function calls)
+              "summary" for a high-level view (modules, functions, classes, methods only)
     """
     lines = ["graph TD"]
     node_id = 0
@@ -120,8 +124,8 @@ def generate_mermaid(project_data):
     for module in project_data["modules"]:
         mod_id = get_node_id()
         node_map[module["file"]] = mod_id
-        # Use a short label (you can adjust if the full path is too long)
-        lines.append(f'{mod_id}["Module: {os.path.basename(module["file"])}"]')
+        mod_label = f"Module: {os.path.basename(module['file'])}"
+        lines.append(f'{mod_id}["{mod_label}"]')
 
         # Top-level functions
         for func in module["functions"]:
@@ -130,16 +134,18 @@ def generate_mermaid(project_data):
             node_map[func_key] = func_id
             lines.append(f'{func_id}["Function: {func["name"]}"]')
             lines.append(f"{mod_id} --> {func_id}")
-            # Edges for function calls
-            for call in func["calls"]:
-                call_key = f'call::{func_key}::{call["name"]}::{call["lineno"]}'
-                if call_key not in node_map:
-                    call_id = get_node_id()
-                    node_map[call_key] = call_id
-                    lines.append(f'{call_id}["Call: {call["name"]} (line {call["lineno"]})"]')
-                else:
-                    call_id = node_map[call_key]
-                lines.append(f"{func_id} --> {call_id}")
+            if mode == "full":
+                # Edges for function calls
+                for call in func["calls"]:
+                    call_key = f'call::{func_key}::{call["name"]}::{call["lineno"]}'
+                    if call_key not in node_map:
+                        call_id = get_node_id()
+                        node_map[call_key] = call_id
+                        call_label = f'Call: {call["name"]} (line {call["lineno"]})'
+                        lines.append(f'{call_id}["{call_label}"]')
+                    else:
+                        call_id = node_map[call_key]
+                    lines.append(f"{func_id} --> {call_id}")
 
         # Classes and their methods
         for cls in module["classes"]:
@@ -154,20 +160,22 @@ def generate_mermaid(project_data):
                 node_map[meth_key] = meth_id
                 lines.append(f'{meth_id}["Method: {method["name"]}"]')
                 lines.append(f"{cls_id} --> {meth_id}")
-                for call in method["calls"]:
-                    call_key = f'call::{meth_key}::{call["name"]}::{call["lineno"]}'
-                    if call_key not in node_map:
-                        call_id = get_node_id()
-                        node_map[call_key] = call_id
-                        lines.append(f'{call_id}["Call: {call["name"]} (line {call["lineno"]})"]')
-                    else:
-                        call_id = node_map[call_key]
-                    lines.append(f"{meth_id} --> {call_id}")
+                if mode == "full":
+                    for call in method["calls"]:
+                        call_key = f'call::{meth_key}::{call["name"]}::{call["lineno"]}'
+                        if call_key not in node_map:
+                            call_id = get_node_id()
+                            node_map[call_key] = call_id
+                            call_label = f'Call: {call["name"]} (line {call["lineno"]})'
+                            lines.append(f'{call_id}["{call_label}"]')
+                        else:
+                            call_id = node_map[call_key]
+                        lines.append(f"{meth_id} --> {call_id}")
 
     return "\n".join(lines)
 
 
-def main(root_dir, output_json, mermaid_file=None):
+def main(root_dir, output_json, mermaid_file=None, mermaid_mode="full"):
     project_data = {"modules": []}
     # Walk through the directory recursively
     for subdir, dirs, files in os.walk(root_dir):
@@ -187,10 +195,10 @@ def main(root_dir, output_json, mermaid_file=None):
 
     # Optionally, write a Mermaid diagram representation
     if mermaid_file:
-        mermaid_code = generate_mermaid(project_data)
+        mermaid_code = generate_mermaid(project_data, mode=mermaid_mode)
         with open(mermaid_file, "w", encoding="utf-8") as f:
             f.write(mermaid_code)
-        print(f"Mermaid diagram output written to {mermaid_file}")
+        print(f"Mermaid diagram output ({mermaid_mode} mode) written to {mermaid_file}")
 
 
 if __name__ == "__main__":
@@ -209,6 +217,11 @@ if __name__ == "__main__":
         default=None,
         help="Optional output file for Mermaid diagram (e.g., project_map.mmd)"
     )
+    parser.add_argument(
+        "--mermaid-mode",
+        choices=["full", "summary"],
+        default="full",
+        help="Mermaid diagram mode: 'full' for detailed view (includes function calls) or 'summary' for high-level view (default: full)"
+    )
     args = parser.parse_args()
-    main(args.root, args.output, args.mermaid)
-
+    main(args.root, args.output, args.mermaid, args.mermaid_mode)
