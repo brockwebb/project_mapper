@@ -28,23 +28,34 @@ You can adjust the level of granularity as needed. (For example, if you decide t
 2. **Capturing Function Calls:**  
    Inside each function (or method), the `FunctionCallVisitor` walks through the AST to collect calls. It handles both simple names (e.g. `foo()`) and attribute calls (e.g. `self.bar()` or `module.func()`).
 
-3. **Output Formats:**  
+3. **Generating Mermaid Diagrams:**  
+   - **Full Mode:** In addition to modules, functions, classes, and methods, it includes nodes and edges for each function/method call.
+   - **Summary Mode:** Omits the detailed function calls, showing only the primary structure.  
+   You choose the mode via `--mermaid-mode`.
+
+4. **Output Formats:**  
    - **JSON:** Contains a structured mapping of modules, functions, classes, and their relationships. This is ideal for machine‑to‑machine processing.
    - **Mermaid (optional):** Produces a simple diagram in Mermaid “graph TD” syntax that you can paste into tools like Obsidian or a Mermaid live editor for quick visual reference.
 
 ## Usage
 
-Save the script (e.g., as `project_mapper.py`), then run it from the command line. For example:
+Below is an updated version of the script that now supports two Mermaid output modes:
 
-```bash
-# Generate JSON mapping only
-python project_mapper.py /path/to/your/project -o my_project_map.json
+- **Full Mode:** Shows all details—including function/method calls.
+- **Summary Mode:** Shows only high-level relationships (modules, functions, classes, and methods).
 
-# Generate both JSON and Mermaid output
-python project_mapper.py /path/to/your/project -o my_project_map.json --mermaid my_project_map.mmd
-```
+You can choose the mode via the command-line argument `--mermaid-mode` (default is `"full"`). This flexibility helps keep diagrams manageable if you have many edges.
 
-You can then load the JSON for further machine processing, or view the Mermaid diagram in your favorite Markdown/Mermaid viewer.
 
----
+4. **Usage Examples:**
 
+   ```bash
+   # Generate JSON mapping only
+   python project_mapper.py /path/to/your/project -o my_project_map.json
+
+   # Generate both JSON and a detailed Mermaid diagram
+   python project_mapper.py /path/to/your/project -o my_project_map.json --mermaid my_project_map.mmd --mermaid-mode full
+
+   # Generate both JSON and a summary Mermaid diagram
+   python project_mapper.py /path/to/your/project -o my_project_map.json --mermaid my_project_map.mmd --mermaid-mode summary
+   ```
