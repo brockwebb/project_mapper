@@ -7,11 +7,11 @@ Simplified Project Mapper:
   - Output a JSON report and a simplified Mermaid diagram of internal module dependencies
 
 Usage:
-  python project_mapper.py <project_root> [--output project_map.json] [--mermaid project_map.mmd]
+  python simplified_project_mapper.py <project_root> [--output project_map.json] [--mermaid project_map.mmd] [--ignore-dir DIR1,DIR2,...]
 
 Example:
-  python project_mapper.py /path/to/your/project --output my_project_map.json --mermaid my_project_map.mmd
-
+  python simplified_project_mapper.py /path/to/your/project --output my_project_map.json --mermaid my_project_map.mmd --ignore-dir tools,tests
+  
 The JSON report will include:
   - directory_tree: A recursive view of your project directories and files with type classification (code, config, data, other)
   - dependency_graph: For each Python file, a list of internal and external modules imported
@@ -42,6 +42,9 @@ IGNORE_PATTERNS = [
     "*.pyc", "*.pyo", ".DS_Store", "build", "dist", ".idea", ".pytest_cache", ".mypy_cache"
 ]
 
+# Global list for additional directories to ignore (populated from command-line)
+ADDITIONAL_IGNORE_DIRS = set()
+
 def should_ignore(name):
     """Check if a file or directory name matches any ignore pattern."""
     for pattern in IGNORE_PATTERNS:
@@ -50,10 +53,10 @@ def should_ignore(name):
     return False
 
 def should_ignore_path(path):
-    """Check if any component of the path should be ignored."""
+    """Check if any component of the path should be ignored or is in the additional ignore list."""
     parts = path.split(os.sep)
     for part in parts:
-        if should_ignore(part):
+        if should_ignore(part) or part in ADDITIONAL_IGNORE_DIRS:
             return True
     return False
 
@@ -99,7 +102,8 @@ def build_directory_tree(root):
 def extract_imports_from_file(file_path):
     """
     Extract import statements from a Python file.
-    Returns a list of imported module names.
+    For 'import' statements, return the module name.
+    For 'from ... import ...' statements, return the full module name.
     """
     imports = []
     try:
@@ -113,28 +117,54 @@ def extract_imports_from_file(file_path):
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                imports.append(alias.name.split('.')[0])
+                # e.g., "import evaluation.models" -> "evaluation.models"
+                imports.append(alias.name)
         elif isinstance(node, ast.ImportFrom):
+            # For relative imports (level > 0), we ignore the dots and use module if available.
             if node.module:
-                imports.append(node.module.split('.')[0])
+                imports.append(node.module)
     return list(set(imports))
+
+def extract_config_loads(file_path):
+    """
+    Extract string literals from a file that look like config filenames.
+    Looks for open() calls with a literal ending with .json, .yaml, or .yml.
+    """
+    config_files = []
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            source = f.read()
+        tree = ast.parse(source, filename=file_path)
+    except Exception as e:
+        return config_files
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            # Look for calls like open("some_config.yaml", ...)
+            for arg in node.args:
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                    val = arg.value
+                    if val.endswith((".json", ".yaml", ".yml")):
+                        config_files.append(val)
+    return list(set(config_files))
 
 def build_dependency_graph(root, directory_tree):
     """
-    Walk through the directory and build a mapping of each Python file to its imports,
-    ignoring files or directories that match the ignore patterns.
+    Walk through the directory and build a mapping of each Python file to its imports and config file loads.
     Differentiates internal (files within the project) and external imports.
     """
-    dependency_graph = {}  # {file_path: {"internal": [], "external": []}}
-    internal_modules = set()
-    # First pass: collect internal module names
+    dependency_graph = {}  # {file_path: {"internal": [], "external": [], "configs": []}}
+    internal_modules = {}  # module_name -> file_path
+    # First pass: collect internal module names using dotted notation from relative paths.
     for subdir, dirs, files in os.walk(root):
         dirs[:] = [d for d in dirs if not should_ignore_path(os.path.join(subdir, d))]
         for file in files:
             if file.endswith(".py") and not should_ignore(file):
-                mod_name = os.path.splitext(file)[0]
-                internal_modules.add(mod_name)
-    # Second pass: build dependency graph
+                file_path = os.path.join(subdir, file)
+                rel_path = os.path.relpath(file_path, root)
+                module_name = os.path.splitext(rel_path)[0].replace(os.sep, ".")
+                internal_modules[module_name] = file_path
+    # Second pass: build dependency graph for Python files.
     for subdir, dirs, files in os.walk(root):
         dirs[:] = [d for d in dirs if not should_ignore_path(os.path.join(subdir, d))]
         for file in files:
@@ -143,15 +173,21 @@ def build_dependency_graph(root, directory_tree):
                 if should_ignore_path(file_path):
                     continue
                 imports = extract_imports_from_file(file_path)
-                dependency_graph[file_path] = {"internal": [], "external": []}
+                config_loads = extract_config_loads(file_path)
+                dependency_graph[file_path] = {"internal": [], "external": [], "configs": config_loads}
                 for imp in imports:
-                    if imp in internal_modules:
-                        dependency_graph[file_path]["internal"].append(imp)
-                    else:
+                    # Try to match against any internal module (exact or as prefix)
+                    matched = False
+                    for mod_name, mod_path in internal_modules.items():
+                        # If the import exactly matches or is a prefix of a module name, count as internal.
+                        if mod_name == imp or mod_name.startswith(imp + "."):
+                            dependency_graph[file_path]["internal"].append(mod_name)
+                            matched = True
+                    if not matched:
                         dependency_graph[file_path]["external"].append(imp)
                 dependency_graph[file_path]["internal"] = list(set(dependency_graph[file_path]["internal"]))
                 dependency_graph[file_path]["external"] = list(set(dependency_graph[file_path]["external"]))
-    return dependency_graph
+    return dependency_graph, internal_modules
 
 def read_requirements(root):
     """
@@ -180,11 +216,25 @@ def aggregate_external_usage(dependency_graph):
             used.add(ext.lower())
     return used
 
-def generate_mermaid_diagram(dependency_graph, root):
+def flatten_directory_tree(tree):
+    """
+    Flatten the directory tree to a list of file nodes.
+    Each node is a dict with keys: path, type.
+    """
+    files = []
+    if tree["type"] != "directory":
+        files.append(tree)
+    else:
+        for child in tree.get("children", []):
+            files.extend(flatten_directory_tree(child))
+    return files
+
+def generate_mermaid_diagram(dependency_graph, internal_modules, root, directory_tree):
     """
     Generate a simplified Mermaid diagram for internal dependencies.
-    Each node is a Python file (module), and an edge exists if a file imports an internal module.
-    This version converts file paths to module names (dotted notation) for better matching.
+    Each node is a Python file (module) or a config file.
+    Edges are drawn from a Python file to an internal module it imports,
+    and from a Python file to a config file it loads.
     """
     lines = ["graph TD"]
     node_ids = {}
@@ -197,32 +247,66 @@ def generate_mermaid_diagram(dependency_graph, root):
             node_id_counter += 1
         return node_ids[name]
 
-    # Precompute mapping: file_path -> module_name (relative path with dots)
-    module_names = {}
+    # Create nodes for Python files (using relative paths) based on dependency_graph keys.
     for file_path in dependency_graph.keys():
         rel_path = os.path.relpath(file_path, root)
-        module_name = os.path.splitext(rel_path)[0].replace(os.sep, ".")
-        module_names[file_path] = module_name
+        get_node_id(rel_path)  # reserve an ID
 
-    for file_path, deps in dependency_graph.items():
+    # Also create nodes for config files found in the directory tree.
+    all_files = flatten_directory_tree(directory_tree)
+    config_files = {}
+    for f in all_files:
+        if f["type"] == "config":
+            config_rel = os.path.relpath(f["path"], root)
+            config_files[config_rel] = f["path"]
+            get_node_id(config_rel)
+
+    # Emit nodes for Python files.
+    for file_path in dependency_graph.keys():
         rel_path = os.path.relpath(file_path, root)
-        src_id = get_node_id(rel_path)
-        lines.append(f'{src_id}["{rel_path}"]')
-        for internal in deps["internal"]:
-            target = None
-            # Look for a file whose module name matches or ends with the imported name.
-            for fp, mod_name in module_names.items():
-                if mod_name == internal or mod_name.endswith("." + internal):
-                    target = os.path.relpath(fp, root)
-                    break
-            if target:
-                tgt_id = get_node_id(target)
+        nid = get_node_id(rel_path)
+        lines.append(f'{nid}["{rel_path}"]')
+    # Emit nodes for config files.
+    for config_rel in config_files.keys():
+        nid = get_node_id(config_rel)
+        lines.append(f'{nid}["{config_rel}"]')
+
+    # Create edges for internal module imports.
+    for file_path, deps in dependency_graph.items():
+        src_rel = os.path.relpath(file_path, root)
+        src_id = get_node_id(src_rel)
+        for mod_name in deps["internal"]:
+            # Look up the file path from internal_modules
+            if mod_name in internal_modules:
+                target_path = internal_modules[mod_name]
+            else:
+                # Try to find one where module name matches ending.
+                target_path = None
+                for m, fp in internal_modules.items():
+                    if m.endswith(mod_name):
+                        target_path = fp
+                        break
+            if target_path:
+                tgt_rel = os.path.relpath(target_path, root)
+                tgt_id = get_node_id(tgt_rel)
+                lines.append(f'{src_id} --> {tgt_id}')
+        # Create edges for config file loads.
+        for conf in deps["configs"]:
+            # If conf is a relative path, try to resolve relative to file_path directory.
+            conf_path = os.path.join(os.path.dirname(file_path), conf)
+            if not os.path.exists(conf_path):
+                # Otherwise, assume conf is relative to project root.
+                conf_path = os.path.join(root, conf)
+            conf_rel = os.path.relpath(conf_path, root)
+            # Only add if the config file exists in our directory tree.
+            if conf_rel in config_files:
+                tgt_id = get_node_id(conf_rel)
                 lines.append(f'{src_id} --> {tgt_id}')
     return "\n".join(lines)
 
 def main(root, output_json, mermaid_file):
     directory_tree = build_directory_tree(root)
-    dependency_graph = build_dependency_graph(root, directory_tree)
+    dependency_graph, internal_modules = build_dependency_graph(root, directory_tree)
     declared_libs = read_requirements(root)
     used_libs = aggregate_external_usage(dependency_graph)
     missing_declaration = list(used_libs - declared_libs)
@@ -243,15 +327,23 @@ def main(root, output_json, mermaid_file):
         json.dump(report, f, indent=4)
     print(f"JSON report written to {output_json}")
 
-    mermaid_code = generate_mermaid_diagram(dependency_graph, root)
+    mermaid_code = generate_mermaid_diagram(dependency_graph, internal_modules, root, directory_tree)
     with open(mermaid_file, "w", encoding="utf-8") as f:
         f.write(mermaid_code)
     print(f"Mermaid diagram written to {mermaid_file}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Simplified Project Mapper with Enhanced Ignore Patterns and Improved Internal Import Matching: Directory tree, module dependencies, and environment comparison.")
+    parser = argparse.ArgumentParser(
+        description="Simplified Project Mapper with Internal Import Matching, Config Loads, and Ignored Directories."
+    )
     parser.add_argument("root", help="Root directory of the project")
     parser.add_argument("--output", "-o", default="project_map.json", help="Output JSON file (default: project_map.json)")
     parser.add_argument("--mermaid", default="project_map.mmd", help="Output Mermaid diagram file (default: project_map.mmd)")
+    parser.add_argument("--ignore-dir", help="Comma-separated list of directory names to ignore (e.g. tools,tests)")
     args = parser.parse_args()
+
+    if args.ignore_dir:
+        for d in args.ignore_dir.split(","):
+            ADDITIONAL_IGNORE_DIRS.add(d.strip())
+
     main(args.root, args.output, args.mermaid)
