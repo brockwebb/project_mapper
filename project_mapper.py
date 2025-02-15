@@ -49,6 +49,14 @@ def should_ignore(name):
             return True
     return False
 
+def should_ignore_path(path):
+    """Check if any component of the path should be ignored."""
+    parts = path.split(os.sep)
+    for part in parts:
+        if should_ignore(part):
+            return True
+    return False
+
 def classify_file(filename):
     ext = os.path.splitext(filename)[1].lower()
     if ext in CODE_EXTENSIONS:
@@ -72,15 +80,15 @@ def build_directory_tree(root):
         return tree
 
     for entry in sorted(entries):
-        if should_ignore(entry):
-            continue
         full_path = os.path.join(root, entry)
+        if should_ignore_path(full_path):
+            continue
         if os.path.isdir(full_path):
             tree["children"].append(build_directory_tree(full_path))
         else:
-            file_type = classify_file(entry)
             if should_ignore(entry):
                 continue
+            file_type = classify_file(entry)
             tree["children"].append({
                 "name": entry,
                 "path": full_path,
@@ -121,18 +129,19 @@ def build_dependency_graph(root, directory_tree):
     internal_modules = set()
     # First pass: collect internal module names
     for subdir, dirs, files in os.walk(root):
-        # Filter out ignored directories
-        dirs[:] = [d for d in dirs if not should_ignore(d)]
+        dirs[:] = [d for d in dirs if not should_ignore_path(os.path.join(subdir, d))]
         for file in files:
             if file.endswith(".py") and not should_ignore(file):
                 mod_name = os.path.splitext(file)[0]
                 internal_modules.add(mod_name)
     # Second pass: build dependency graph
     for subdir, dirs, files in os.walk(root):
-        dirs[:] = [d for d in dirs if not should_ignore(d)]
+        dirs[:] = [d for d in dirs if not should_ignore_path(os.path.join(subdir, d))]
         for file in files:
             if file.endswith(".py") and not should_ignore(file):
                 file_path = os.path.join(subdir, file)
+                if should_ignore_path(file_path):
+                    continue
                 imports = extract_imports_from_file(file_path)
                 dependency_graph[file_path] = {"internal": [], "external": []}
                 for imp in imports:
@@ -175,6 +184,7 @@ def generate_mermaid_diagram(dependency_graph, root):
     """
     Generate a simplified Mermaid diagram for internal dependencies.
     Each node is a Python file (module), and an edge exists if a file imports an internal module.
+    This version converts file paths to module names (dotted notation) for better matching.
     """
     lines = ["graph TD"]
     node_ids = {}
@@ -187,14 +197,22 @@ def generate_mermaid_diagram(dependency_graph, root):
             node_id_counter += 1
         return node_ids[name]
 
+    # Precompute mapping: file_path -> module_name (relative path with dots)
+    module_names = {}
+    for file_path in dependency_graph.keys():
+        rel_path = os.path.relpath(file_path, root)
+        module_name = os.path.splitext(rel_path)[0].replace(os.sep, ".")
+        module_names[file_path] = module_name
+
     for file_path, deps in dependency_graph.items():
         rel_path = os.path.relpath(file_path, root)
         src_id = get_node_id(rel_path)
         lines.append(f'{src_id}["{rel_path}"]')
         for internal in deps["internal"]:
             target = None
-            for fp in dependency_graph.keys():
-                if os.path.splitext(os.path.basename(fp))[0] == internal:
+            # Look for a file whose module name matches or ends with the imported name.
+            for fp, mod_name in module_names.items():
+                if mod_name == internal or mod_name.endswith("." + internal):
                     target = os.path.relpath(fp, root)
                     break
             if target:
@@ -231,7 +249,7 @@ def main(root, output_json, mermaid_file):
     print(f"Mermaid diagram written to {mermaid_file}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Simplified Project Mapper with Ignore Patterns: Directory tree, module dependencies, and environment comparison.")
+    parser = argparse.ArgumentParser(description="Simplified Project Mapper with Enhanced Ignore Patterns and Improved Internal Import Matching: Directory tree, module dependencies, and environment comparison.")
     parser.add_argument("root", help="Root directory of the project")
     parser.add_argument("--output", "-o", default="project_map.json", help="Output JSON file (default: project_map.json)")
     parser.add_argument("--mermaid", default="project_map.mmd", help="Output Mermaid diagram file (default: project_map.mmd)")
