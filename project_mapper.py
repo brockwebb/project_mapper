@@ -7,17 +7,17 @@ Simplified Project Mapper:
   - Output a JSON report and a simplified Mermaid diagram of internal module dependencies
 
 Usage:
-  python simplified_project_mapper.py <project_root> [--output project_map.json] [--mermaid project_map.mmd]
+  python project_mapper.py <project_root> [--output project_map.json] [--mermaid project_map.mmd]
 
 Example:
-  python simplified_project_mapper.py /path/to/your/project --output my_project_map.json --mermaid my_project_map.mmd
+  python project_mapper.py /path/to/your/project --output my_project_map.json --mermaid my_project_map.mmd
 
 The JSON report will include:
   - directory_tree: A recursive view of your project directories and files with type classification (code, config, data, other)
   - dependency_graph: For each Python file, a list of internal and external modules imported
   - environment: Comparison of external libraries declared in requirements.txt versus those actually imported
       - declared_external_libs: Libraries declared in requirements.txt
-      - used_external_libs: Libraries imported in your code
+      - used_external_libs: Libraries imported into your code
       - missing_declaration: Libraries used in code but missing from requirements.txt
       - unused_declaration: Libraries declared in requirements.txt but not used in code
 
