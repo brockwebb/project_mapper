@@ -29,11 +29,25 @@ import ast
 import json
 import re
 import argparse
+import fnmatch
 
 # Define file type categories based on extension
 CODE_EXTENSIONS = {'.py'}
 CONFIG_EXTENSIONS = {'.json', '.yaml', '.yml'}
 DATA_EXTENSIONS = {'.csv', '.tsv', '.xlsx', '.pdf', '.txt'}
+
+# Define a list of ignore patterns for directories and files.
+IGNORE_PATTERNS = [
+    ".git", "__pycache__", ".ipynb_checkpoints", "venv", "env", "archive", "node_modules",
+    "*.pyc", "*.pyo", ".DS_Store", "build", "dist", ".idea", ".pytest_cache", ".mypy_cache"
+]
+
+def should_ignore(name):
+    """Check if a file or directory name matches any ignore pattern."""
+    for pattern in IGNORE_PATTERNS:
+        if fnmatch.fnmatch(name, pattern):
+            return True
+    return False
 
 def classify_file(filename):
     ext = os.path.splitext(filename)[1].lower()
@@ -48,7 +62,8 @@ def classify_file(filename):
 
 def build_directory_tree(root):
     """
-    Recursively build a directory tree with files classified by type.
+    Recursively build a directory tree with files classified by type,
+    ignoring directories or files that match the ignore patterns.
     """
     tree = {"name": os.path.basename(root), "path": root, "type": "directory", "children": []}
     try:
@@ -57,11 +72,15 @@ def build_directory_tree(root):
         return tree
 
     for entry in sorted(entries):
+        if should_ignore(entry):
+            continue
         full_path = os.path.join(root, entry)
         if os.path.isdir(full_path):
             tree["children"].append(build_directory_tree(full_path))
         else:
             file_type = classify_file(entry)
+            if should_ignore(entry):
+                continue
             tree["children"].append({
                 "name": entry,
                 "path": full_path,
@@ -86,31 +105,33 @@ def extract_imports_from_file(file_path):
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                # import module [as alias]
                 imports.append(alias.name.split('.')[0])
         elif isinstance(node, ast.ImportFrom):
-            # from module import something
             if node.module:
                 imports.append(node.module.split('.')[0])
     return list(set(imports))
 
 def build_dependency_graph(root, directory_tree):
     """
-    Walk through the directory and build a mapping of each Python file to its imports.
+    Walk through the directory and build a mapping of each Python file to its imports,
+    ignoring files or directories that match the ignore patterns.
     Differentiates internal (files within the project) and external imports.
     """
-    dependency_graph = {}  # {file_path: {"internal": set(), "external": set()}}
-    # Gather all internal module names (from python files relative to root)
+    dependency_graph = {}  # {file_path: {"internal": [], "external": []}}
     internal_modules = set()
+    # First pass: collect internal module names
     for subdir, dirs, files in os.walk(root):
+        # Filter out ignored directories
+        dirs[:] = [d for d in dirs if not should_ignore(d)]
         for file in files:
-            if file.endswith(".py"):
+            if file.endswith(".py") and not should_ignore(file):
                 mod_name = os.path.splitext(file)[0]
                 internal_modules.add(mod_name)
-    # Walk through python files again
+    # Second pass: build dependency graph
     for subdir, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if not should_ignore(d)]
         for file in files:
-            if file.endswith(".py"):
+            if file.endswith(".py") and not should_ignore(file):
                 file_path = os.path.join(subdir, file)
                 imports = extract_imports_from_file(file_path)
                 dependency_graph[file_path] = {"internal": [], "external": []}
@@ -119,7 +140,6 @@ def build_dependency_graph(root, directory_tree):
                         dependency_graph[file_path]["internal"].append(imp)
                     else:
                         dependency_graph[file_path]["external"].append(imp)
-                # Deduplicate
                 dependency_graph[file_path]["internal"] = list(set(dependency_graph[file_path]["internal"]))
                 dependency_graph[file_path]["external"] = list(set(dependency_graph[file_path]["external"]))
     return dependency_graph
@@ -135,10 +155,8 @@ def read_requirements(root):
         with open(req_path, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
-                # Skip comments and blank lines
                 if line.startswith("#") or not line:
                     continue
-                # Extract package name (remove version specifiers)
                 pkg = re.split(r"[<=>]", line)[0].strip().lower()
                 declared.add(pkg)
     return declared
@@ -170,13 +188,10 @@ def generate_mermaid_diagram(dependency_graph, root):
         return node_ids[name]
 
     for file_path, deps in dependency_graph.items():
-        # Use relative path for brevity
         rel_path = os.path.relpath(file_path, root)
         src_id = get_node_id(rel_path)
         lines.append(f'{src_id}["{rel_path}"]')
-        # Draw edges for each internal dependency
         for internal in deps["internal"]:
-            # Heuristic: assume that internal dependency points to a file whose name matches the module name.
             target = None
             for fp in dependency_graph.keys():
                 if os.path.splitext(os.path.basename(fp))[0] == internal:
@@ -192,7 +207,6 @@ def main(root, output_json, mermaid_file):
     dependency_graph = build_dependency_graph(root, directory_tree)
     declared_libs = read_requirements(root)
     used_libs = aggregate_external_usage(dependency_graph)
-    # Compute delta: libraries used in code but not declared, and vice versa.
     missing_declaration = list(used_libs - declared_libs)
     unused_declaration = list(declared_libs - used_libs)
     
@@ -207,19 +221,17 @@ def main(root, output_json, mermaid_file):
         }
     }
     
-    # Write JSON report
     with open(output_json, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=4)
     print(f"JSON report written to {output_json}")
 
-    # Generate and write Mermaid diagram for internal dependencies
     mermaid_code = generate_mermaid_diagram(dependency_graph, root)
     with open(mermaid_file, "w", encoding="utf-8") as f:
         f.write(mermaid_code)
     print(f"Mermaid diagram written to {mermaid_file}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Simplified Project Mapper: Directory tree, module dependencies, and environment comparison.")
+    parser = argparse.ArgumentParser(description="Simplified Project Mapper with Ignore Patterns: Directory tree, module dependencies, and environment comparison.")
     parser.add_argument("root", help="Root directory of the project")
     parser.add_argument("--output", "-o", default="project_map.json", help="Output JSON file (default: project_map.json)")
     parser.add_argument("--mermaid", default="project_map.mmd", help="Output Mermaid diagram file (default: project_map.mmd)")
