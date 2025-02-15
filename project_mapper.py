@@ -1,227 +1,227 @@
 #!/usr/bin/env python3
 """
-Project Mapper: Create a mapping of your Python project’s functions, classes, and interdependencies.
-Outputs a JSON file and (optionally) a Mermaid diagram file.
-Supports two Mermaid modes: "full" (detailed, including function calls) and "summary" (high-level).
+Simplified Project Mapper:
+  - Build a directory tree mapping (grouped by file type)
+  - Build a module-level dependency graph from Python import statements
+  - Compare external libraries used vs. those declared in requirements.txt
+  - Output a JSON report and a simplified Mermaid diagram of internal module dependencies
+
+Usage:
+  python simplified_project_mapper.py <project_root> [--output project_map.json] [--mermaid project_map.mmd]
+
+Example:
+  python simplified_project_mapper.py /path/to/your/project --output my_project_map.json --mermaid my_project_map.mmd
+
+The JSON report will include:
+  - directory_tree: A recursive view of your project directories and files with type classification (code, config, data, other)
+  - dependency_graph: For each Python file, a list of internal and external modules imported
+  - environment: Comparison of external libraries declared in requirements.txt versus those actually imported
+      - declared_external_libs: Libraries declared in requirements.txt
+      - used_external_libs: Libraries imported in your code
+      - missing_declaration: Libraries used in code but missing from requirements.txt
+      - unused_declaration: Libraries declared in requirements.txt but not used in code
+
+The Mermaid diagram will provide a high-level visualization of internal module dependencies.
 """
 
 import os
 import ast
 import json
+import re
 import argparse
 
+# Define file type categories based on extension
+CODE_EXTENSIONS = {'.py'}
+CONFIG_EXTENSIONS = {'.json', '.yaml', '.yml'}
+DATA_EXTENSIONS = {'.csv', '.tsv', '.xlsx', '.pdf', '.txt'}
 
-class FunctionCallVisitor(ast.NodeVisitor):
-    """
-    AST visitor to capture function calls within a function or method.
-    """
-    def __init__(self):
-        self.calls = []
+def classify_file(filename):
+    ext = os.path.splitext(filename)[1].lower()
+    if ext in CODE_EXTENSIONS:
+        return "code"
+    elif ext in CONFIG_EXTENSIONS:
+        return "config"
+    elif ext in DATA_EXTENSIONS:
+        return "data"
+    else:
+        return "other"
 
-    def visit_Call(self, node):
-        func_name = self.get_called_name(node.func)
-        if func_name:
-            self.calls.append({
-                "name": func_name,
-                "lineno": node.lineno
+def build_directory_tree(root):
+    """
+    Recursively build a directory tree with files classified by type.
+    """
+    tree = {"name": os.path.basename(root), "path": root, "type": "directory", "children": []}
+    try:
+        entries = os.listdir(root)
+    except PermissionError:
+        return tree
+
+    for entry in sorted(entries):
+        full_path = os.path.join(root, entry)
+        if os.path.isdir(full_path):
+            tree["children"].append(build_directory_tree(full_path))
+        else:
+            file_type = classify_file(entry)
+            tree["children"].append({
+                "name": entry,
+                "path": full_path,
+                "type": file_type
             })
-        self.generic_visit(node)
+    return tree
 
-    def get_called_name(self, node):
-        """
-        Attempt to extract a dotted name from the call node.
-        """
-        if isinstance(node, ast.Name):
-            return node.id
-        elif isinstance(node, ast.Attribute):
-            parts = []
-            while isinstance(node, ast.Attribute):
-                parts.append(node.attr)
-                node = node.value
-            if isinstance(node, ast.Name):
-                parts.append(node.id)
-            return ".".join(reversed(parts))
-        return None
-
-
-def parse_functions_and_classes(file_path):
+def extract_imports_from_file(file_path):
     """
-    Parse a Python file and return a dictionary with its functions and classes.
+    Extract import statements from a Python file.
+    Returns a list of imported module names.
     """
+    imports = []
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             source = f.read()
         tree = ast.parse(source, filename=file_path)
     except Exception as e:
         print(f"Error parsing {file_path}: {e}")
-        return None
+        return imports
 
-    module_data = {
-        "file": file_path,
-        "functions": [],
-        "classes": []
-    }
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                # import module [as alias]
+                imports.append(alias.name.split('.')[0])
+        elif isinstance(node, ast.ImportFrom):
+            # from module import something
+            if node.module:
+                imports.append(node.module.split('.')[0])
+    return list(set(imports))
 
-    # Process top-level definitions
-    for node in ast.iter_child_nodes(tree):
-        if isinstance(node, ast.FunctionDef):
-            func_data = {
-                "name": node.name,
-                "lineno": node.lineno,
-                "args": [arg.arg for arg in node.args.args],
-                "docstring": ast.get_docstring(node),
-                "calls": []
-            }
-            visitor = FunctionCallVisitor()
-            visitor.visit(node)
-            func_data["calls"] = visitor.calls
-            module_data["functions"].append(func_data)
-        elif isinstance(node, ast.ClassDef):
-            class_data = {
-                "name": node.name,
-                "lineno": node.lineno,
-                "docstring": ast.get_docstring(node),
-                "methods": []
-            }
-            for subnode in node.body:
-                if isinstance(subnode, ast.FunctionDef):
-                    method_data = {
-                        "name": subnode.name,
-                        "lineno": subnode.lineno,
-                        "args": [arg.arg for arg in subnode.args.args],
-                        "docstring": ast.get_docstring(subnode),
-                        "calls": []
-                    }
-                    visitor = FunctionCallVisitor()
-                    visitor.visit(subnode)
-                    method_data["calls"] = visitor.calls
-                    class_data["methods"].append(method_data)
-            module_data["classes"].append(class_data)
-
-    return module_data
-
-
-def generate_mermaid(project_data, mode="full"):
+def build_dependency_graph(root, directory_tree):
     """
-    Generate Mermaid code (graph TD) from the project mapping.
-    
-    Parameters:
-      - project_data: the JSON mapping of the project.
-      - mode: "full" for detailed view (including function calls)
-              "summary" for a high-level view (modules, functions, classes, methods only)
+    Walk through the directory and build a mapping of each Python file to its imports.
+    Differentiates internal (files within the project) and external imports.
     """
-    lines = ["graph TD"]
-    node_id = 0
-    node_map = {}  # Map to keep track of assigned node IDs
-
-    def get_node_id():
-        nonlocal node_id
-        nid = f"node{node_id}"
-        node_id += 1
-        return nid
-
-    # Iterate through modules
-    for module in project_data["modules"]:
-        mod_id = get_node_id()
-        node_map[module["file"]] = mod_id
-        mod_label = f"Module: {os.path.basename(module['file'])}"
-        lines.append(f'{mod_id}["{mod_label}"]')
-
-        # Top-level functions
-        for func in module["functions"]:
-            func_key = f'{module["file"]}::{func["name"]}'
-            func_id = get_node_id()
-            node_map[func_key] = func_id
-            lines.append(f'{func_id}["Function: {func["name"]}"]')
-            lines.append(f"{mod_id} --> {func_id}")
-            if mode == "full":
-                # Edges for function calls
-                for call in func["calls"]:
-                    call_key = f'call::{func_key}::{call["name"]}::{call["lineno"]}'
-                    if call_key not in node_map:
-                        call_id = get_node_id()
-                        node_map[call_key] = call_id
-                        call_label = f'Call: {call["name"]} (line {call["lineno"]})'
-                        lines.append(f'{call_id}["{call_label}"]')
-                    else:
-                        call_id = node_map[call_key]
-                    lines.append(f"{func_id} --> {call_id}")
-
-        # Classes and their methods
-        for cls in module["classes"]:
-            cls_key = f'{module["file"]}::class::{cls["name"]}'
-            cls_id = get_node_id()
-            node_map[cls_key] = cls_id
-            lines.append(f'{cls_id}["Class: {cls["name"]}"]')
-            lines.append(f"{mod_id} --> {cls_id}")
-            for method in cls["methods"]:
-                meth_key = f'{cls_key}::{method["name"]}'
-                meth_id = get_node_id()
-                node_map[meth_key] = meth_id
-                lines.append(f'{meth_id}["Method: {method["name"]}"]')
-                lines.append(f"{cls_id} --> {meth_id}")
-                if mode == "full":
-                    for call in method["calls"]:
-                        call_key = f'call::{meth_key}::{call["name"]}::{call["lineno"]}'
-                        if call_key not in node_map:
-                            call_id = get_node_id()
-                            node_map[call_key] = call_id
-                            call_label = f'Call: {call["name"]} (line {call["lineno"]})'
-                            lines.append(f'{call_id}["{call_label}"]')
-                        else:
-                            call_id = node_map[call_key]
-                        lines.append(f"{meth_id} --> {call_id}")
-
-    return "\n".join(lines)
-
-
-def main(root_dir, output_json, mermaid_file=None, mermaid_mode="full"):
-    project_data = {"modules": []}
-    # Walk through the directory recursively
-    for subdir, dirs, files in os.walk(root_dir):
-        # Exclude some directories (e.g. .git, __pycache__)
-        dirs[:] = [d for d in dirs if d not in [".git", "__pycache__"]]
+    dependency_graph = {}  # {file_path: {"internal": set(), "external": set()}}
+    # Gather all internal module names (from python files relative to root)
+    internal_modules = set()
+    for subdir, dirs, files in os.walk(root):
+        for file in files:
+            if file.endswith(".py"):
+                mod_name = os.path.splitext(file)[0]
+                internal_modules.add(mod_name)
+    # Walk through python files again
+    for subdir, dirs, files in os.walk(root):
         for file in files:
             if file.endswith(".py"):
                 file_path = os.path.join(subdir, file)
-                module_info = parse_functions_and_classes(file_path)
-                if module_info is not None:
-                    project_data["modules"].append(module_info)
+                imports = extract_imports_from_file(file_path)
+                dependency_graph[file_path] = {"internal": [], "external": []}
+                for imp in imports:
+                    if imp in internal_modules:
+                        dependency_graph[file_path]["internal"].append(imp)
+                    else:
+                        dependency_graph[file_path]["external"].append(imp)
+                # Deduplicate
+                dependency_graph[file_path]["internal"] = list(set(dependency_graph[file_path]["internal"]))
+                dependency_graph[file_path]["external"] = list(set(dependency_graph[file_path]["external"]))
+    return dependency_graph
 
-    # Write the JSON mapping
+def read_requirements(root):
+    """
+    Read a requirements.txt file from the project root (if it exists).
+    Returns a set of declared external libraries (lowercase).
+    """
+    req_path = os.path.join(root, "requirements.txt")
+    declared = set()
+    if os.path.exists(req_path):
+        with open(req_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                # Skip comments and blank lines
+                if line.startswith("#") or not line:
+                    continue
+                # Extract package name (remove version specifiers)
+                pkg = re.split(r"[<=>]", line)[0].strip().lower()
+                declared.add(pkg)
+    return declared
+
+def aggregate_external_usage(dependency_graph):
+    """
+    Aggregate external libraries imported across all python files.
+    """
+    used = set()
+    for file_path, deps in dependency_graph.items():
+        for ext in deps["external"]:
+            used.add(ext.lower())
+    return used
+
+def generate_mermaid_diagram(dependency_graph, root):
+    """
+    Generate a simplified Mermaid diagram for internal dependencies.
+    Each node is a Python file (module), and an edge exists if a file imports an internal module.
+    """
+    lines = ["graph TD"]
+    node_ids = {}
+    node_id_counter = 0
+
+    def get_node_id(name):
+        nonlocal node_id_counter
+        if name not in node_ids:
+            node_ids[name] = f"node{node_id_counter}"
+            node_id_counter += 1
+        return node_ids[name]
+
+    for file_path, deps in dependency_graph.items():
+        # Use relative path for brevity
+        rel_path = os.path.relpath(file_path, root)
+        src_id = get_node_id(rel_path)
+        lines.append(f'{src_id}["{rel_path}"]')
+        # Draw edges for each internal dependency
+        for internal in deps["internal"]:
+            # Heuristic: assume that internal dependency points to a file whose name matches the module name.
+            target = None
+            for fp in dependency_graph.keys():
+                if os.path.splitext(os.path.basename(fp))[0] == internal:
+                    target = os.path.relpath(fp, root)
+                    break
+            if target:
+                tgt_id = get_node_id(target)
+                lines.append(f'{src_id} --> {tgt_id}')
+    return "\n".join(lines)
+
+def main(root, output_json, mermaid_file):
+    directory_tree = build_directory_tree(root)
+    dependency_graph = build_dependency_graph(root, directory_tree)
+    declared_libs = read_requirements(root)
+    used_libs = aggregate_external_usage(dependency_graph)
+    # Compute delta: libraries used in code but not declared, and vice versa.
+    missing_declaration = list(used_libs - declared_libs)
+    unused_declaration = list(declared_libs - used_libs)
+    
+    report = {
+        "directory_tree": directory_tree,
+        "dependency_graph": dependency_graph,
+        "environment": {
+            "declared_external_libs": list(declared_libs),
+            "used_external_libs": list(used_libs),
+            "missing_declaration": missing_declaration,
+            "unused_declaration": unused_declaration
+        }
+    }
+    
+    # Write JSON report
     with open(output_json, "w", encoding="utf-8") as f:
-        json.dump(project_data, f, indent=4)
-    print(f"JSON output written to {output_json}")
+        json.dump(report, f, indent=4)
+    print(f"JSON report written to {output_json}")
 
-    # Optionally, write a Mermaid diagram representation
-    if mermaid_file:
-        mermaid_code = generate_mermaid(project_data, mode=mermaid_mode)
-        with open(mermaid_file, "w", encoding="utf-8") as f:
-            f.write(mermaid_code)
-        print(f"Mermaid diagram output ({mermaid_mode} mode) written to {mermaid_file}")
-
+    # Generate and write Mermaid diagram for internal dependencies
+    mermaid_code = generate_mermaid_diagram(dependency_graph, root)
+    with open(mermaid_file, "w", encoding="utf-8") as f:
+        f.write(mermaid_code)
+    print(f"Mermaid diagram written to {mermaid_file}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Generate a mapping of Python project functions/classes and their call relationships."
-    )
-    parser.add_argument("root", help="Root directory of the project (e.g., the git repo root)")
-    parser.add_argument(
-        "-o",
-        "--output",
-        default="project_map.json",
-        help="Output JSON file (default: project_map.json)"
-    )
-    parser.add_argument(
-        "--mermaid",
-        default=None,
-        help="Optional output file for Mermaid diagram (e.g., project_map.mmd)"
-    )
-    parser.add_argument(
-        "--mermaid-mode",
-        choices=["full", "summary"],
-        default="full",
-        help="Mermaid diagram mode: 'full' for detailed view (includes function calls) or 'summary' for high-level view (default: full)"
-    )
+    parser = argparse.ArgumentParser(description="Simplified Project Mapper: Directory tree, module dependencies, and environment comparison.")
+    parser.add_argument("root", help="Root directory of the project")
+    parser.add_argument("--output", "-o", default="project_map.json", help="Output JSON file (default: project_map.json)")
+    parser.add_argument("--mermaid", default="project_map.mmd", help="Output Mermaid diagram file (default: project_map.mmd)")
     args = parser.parse_args()
-    main(args.root, args.output, args.mermaid, args.mermaid_mode)
+    main(args.root, args.output, args.mermaid)
