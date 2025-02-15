@@ -36,26 +36,39 @@ You can tweak file classifications or dependency heuristics as needed.
 5. **Outputs:**  
    - A JSON file that contains the directory tree, dependency graph, and environment delta.  
    - A Mermaid file you can load into any Mermaid viewer (or Obsidian) for a visual overview.
+   - A D3 file you can load into any D3 viewer for an interactive visualization experience.
 
-### How to Use:
+### How It Works:
 
-1. **Save the Script:**  
-   Save the script to a file named `project_mapper.py`.
+1. **Command‑Line Options:**  
+   - You supply the project folder path with `--path`.
+   - Optionally, supply directories to ignore via `--ignore-dir`.
 
-2. **Run the Script:**  
-   Open a terminal and navigate to the directory where the script is saved.
+2. **Interactive Dialogue:**  
+   - The script then asks for a base file name.
+   - It creates three files in the project folder: `<base>_ai.json`, `<base>_mermaid.mmd`, and `<base>_d3.html`.
 
-3. **Example Command Line Usage:**  
-   To analyze a project located at `/path/to/your/project`, run:
-   ```
-   python project_mapper.py /path/to/your/project --output my_project_map.json --mermaid my_project_map.mmd
-   ```
-   - This will generate:
-     - A JSON report named `my_project_map.json`
-     - A Mermaid diagram file named `my_project_map.mmd`
+3. **Output Exclusion:**  
+   - Files whose base names contain `_ai`, `_mermaid`, or `_d3` are ignored in the mapping.
 
-4. **Review the Outputs:**  
-   - Open the JSON report to inspect the directory tree, module dependency graph, and environment comparisons.
-   - Load the Mermaid diagram in any Mermaid viewer (or Obsidian) to visualize the internal module dependencies.
+4. **Mapping Generation:**  
+   - The script builds the directory tree and dependency graph.
+   - It outputs the JSON report, a Mermaid diagram, and a D3 HTML file for interactive viewing.
 
+### Usage Example:
+
+Run the script like this:
+
+```
+python project_mapper.py --path /path/to/your/project --ignore-dir tools,tests,data
+```
+
+Then, when prompted, enter a base file name (for example, "my_project_map"). The outputs will be created as:
+- `/path/to/your/project/my_project_map_ai.json`
+- `/path/to/your/project/my_project_map_mermaid.mmd`
+- `/path/to/your/project/my_project_map_d3.html`
+
+Open the D3 HTML file in your browser to interactively view your project mapping.
+
+Let me know if you need further adjustments!
 
