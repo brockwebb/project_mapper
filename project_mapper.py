@@ -24,6 +24,7 @@ The JSON report will include:
 The Mermaid diagram will provide a high-level visualization of internal module dependencies.
 """
 
+
 import os
 import ast
 import json
@@ -117,10 +118,8 @@ def extract_imports_from_file(file_path):
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                # e.g., "import evaluation.models" -> "evaluation.models"
                 imports.append(alias.name)
         elif isinstance(node, ast.ImportFrom):
-            # For relative imports (level > 0), we ignore the dots and use module if available.
             if node.module:
                 imports.append(node.module)
     return list(set(imports))
@@ -140,7 +139,6 @@ def extract_config_loads(file_path):
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
-            # Look for calls like open("some_config.yaml", ...)
             for arg in node.args:
                 if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
                     val = arg.value
@@ -176,10 +174,9 @@ def build_dependency_graph(root, directory_tree):
                 config_loads = extract_config_loads(file_path)
                 dependency_graph[file_path] = {"internal": [], "external": [], "configs": config_loads}
                 for imp in imports:
-                    # Try to match against any internal module (exact or as prefix)
                     matched = False
-                    for mod_name, mod_path in internal_modules.items():
-                        # If the import exactly matches or is a prefix of a module name, count as internal.
+                    # Match against internal modules
+                    for mod_name in internal_modules.keys():
                         if mod_name == imp or mod_name.startswith(imp + "."):
                             dependency_graph[file_path]["internal"].append(mod_name)
                             matched = True
@@ -235,6 +232,7 @@ def generate_mermaid_diagram(dependency_graph, internal_modules, root, directory
     Each node is a Python file (module) or a config file.
     Edges are drawn from a Python file to an internal module it imports,
     and from a Python file to a config file it loads.
+    Optionally, you could group stand-alone config files or other assets.
     """
     lines = ["graph TD"]
     node_ids = {}
@@ -247,19 +245,27 @@ def generate_mermaid_diagram(dependency_graph, internal_modules, root, directory
             node_id_counter += 1
         return node_ids[name]
 
-    # Create nodes for Python files (using relative paths) based on dependency_graph keys.
+    # Precompute mapping: file_path -> module_name (dotted notation)
+    module_names = {}
     for file_path in dependency_graph.keys():
         rel_path = os.path.relpath(file_path, root)
-        get_node_id(rel_path)  # reserve an ID
+        module_name = os.path.splitext(rel_path)[0].replace(os.sep, ".")
+        module_names[file_path] = module_name
 
-    # Also create nodes for config files found in the directory tree.
+    # Create nodes for Python files (using relative paths)
+    for file_path in dependency_graph.keys():
+        rel_path = os.path.relpath(file_path, root)
+        get_node_id(rel_path)
+
+    # Create nodes for config files found in the directory tree,
+    # but only include those that have a "config" type and are actually loaded.
     all_files = flatten_directory_tree(directory_tree)
     config_files = {}
     for f in all_files:
         if f["type"] == "config":
-            config_rel = os.path.relpath(f["path"], root)
-            config_files[config_rel] = f["path"]
-            get_node_id(config_rel)
+            rel = os.path.relpath(f["path"], root)
+            config_files[rel] = f["path"]
+            get_node_id(rel)
 
     # Emit nodes for Python files.
     for file_path in dependency_graph.keys():
@@ -267,21 +273,18 @@ def generate_mermaid_diagram(dependency_graph, internal_modules, root, directory
         nid = get_node_id(rel_path)
         lines.append(f'{nid}["{rel_path}"]')
     # Emit nodes for config files.
-    for config_rel in config_files.keys():
-        nid = get_node_id(config_rel)
-        lines.append(f'{nid}["{config_rel}"]')
+    for conf_rel in config_files.keys():
+        nid = get_node_id(conf_rel)
+        lines.append(f'{nid}["{conf_rel}"]')
 
     # Create edges for internal module imports.
     for file_path, deps in dependency_graph.items():
         src_rel = os.path.relpath(file_path, root)
         src_id = get_node_id(src_rel)
         for mod_name in deps["internal"]:
-            # Look up the file path from internal_modules
-            if mod_name in internal_modules:
-                target_path = internal_modules[mod_name]
-            else:
-                # Try to find one where module name matches ending.
-                target_path = None
+            # Find the file path corresponding to the module.
+            target_path = internal_modules.get(mod_name)
+            if not target_path:
                 for m, fp in internal_modules.items():
                     if m.endswith(mod_name):
                         target_path = fp
@@ -292,13 +295,11 @@ def generate_mermaid_diagram(dependency_graph, internal_modules, root, directory
                 lines.append(f'{src_id} --> {tgt_id}')
         # Create edges for config file loads.
         for conf in deps["configs"]:
-            # If conf is a relative path, try to resolve relative to file_path directory.
+            # Resolve relative to file_path's directory; otherwise relative to project root.
             conf_path = os.path.join(os.path.dirname(file_path), conf)
             if not os.path.exists(conf_path):
-                # Otherwise, assume conf is relative to project root.
                 conf_path = os.path.join(root, conf)
             conf_rel = os.path.relpath(conf_path, root)
-            # Only add if the config file exists in our directory tree.
             if conf_rel in config_files:
                 tgt_id = get_node_id(conf_rel)
                 lines.append(f'{src_id} --> {tgt_id}')
@@ -339,7 +340,7 @@ if __name__ == "__main__":
     parser.add_argument("root", help="Root directory of the project")
     parser.add_argument("--output", "-o", default="project_map.json", help="Output JSON file (default: project_map.json)")
     parser.add_argument("--mermaid", default="project_map.mmd", help="Output Mermaid diagram file (default: project_map.mmd)")
-    parser.add_argument("--ignore-dir", help="Comma-separated list of directory names to ignore (e.g. tools,tests)")
+    parser.add_argument("--ignore-dir", help="Comma-separated list of directory names to ignore (e.g. tools,tests,data)")
     args = parser.parse_args()
 
     if args.ignore_dir:
@@ -347,3 +348,4 @@ if __name__ == "__main__":
             ADDITIONAL_IGNORE_DIRS.add(d.strip())
 
     main(args.root, args.output, args.mermaid)
+
