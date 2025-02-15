@@ -1,38 +1,37 @@
 #!/usr/bin/env python3
 """
-Simplified Project Mapper with Interactive Dialogue
+Simplified Project Mapper
 
-This script will:
-  a) Ask for the path to your project folder (outputs will be saved in that folder).
-  b) Ask for a base file name for outputs. It will then create three output files:
-       - <base>_ai.json   : the JSON report (mapping)
-       - <base>_mermaid.mmd : the Mermaid diagram
-       - <base>_d3.html   : the D3 interactive visualization HTML file
-  c) Ask for a comma-separated list of directory names to ignore.
-  d) Automatically ignore files whose base names contain "_ai", "_mermaid", or "_d3"
-     (so that your output files are not re-processed).
+Usage:
+  python project_mapper.py --path /path/to/your/project [--ignore-dir DIR1,DIR2,...]
 
-Outputs will be saved in the project folder.
+This script takes the project folder path and an optional comma-separated list of
+directory names to ignore. It then prompts you for a base output file name. The outputs
+will be saved in the project folder as:
+  - <base>_ai.json     (the JSON report)
+  - <base>_mermaid.mmd (the Mermaid diagram)
+  - <base>_d3.html     (the D3 interactive HTML file)
 """
 
 import os
 import ast
 import json
 import re
+import argparse
 import fnmatch
 
-# Define file type categories based on extension
+# Define file type categories based on extension.
 CODE_EXTENSIONS = {'.py'}
 CONFIG_EXTENSIONS = {'.json', '.yaml', '.yml'}
 DATA_EXTENSIONS = {'.csv', '.tsv', '.xlsx', '.pdf', '.txt'}
 
-# Built-in ignore patterns for directories and files.
+# Built-in ignore patterns.
 IGNORE_PATTERNS = [
     ".git", "__pycache__", ".ipynb_checkpoints", "venv", "env", "archive", "node_modules",
     "*.pyc", "*.pyo", ".DS_Store", "build", "dist", ".idea", ".pytest_cache", ".mypy_cache"
 ]
 
-# Global set for additional directories to ignore (populated from interactive input)
+# Global set for additional directories to ignore (populated from command-line option).
 ADDITIONAL_IGNORE_DIRS = set()
 
 def should_ignore(name):
@@ -51,9 +50,7 @@ def should_ignore_output_file(filename):
     return False
 
 def should_ignore_path(path):
-    """
-    Return True if any component of the path matches an ignore pattern or is in the additional ignore list.
-    """
+    """Return True if any component of the path should be ignored or is in the additional ignore list."""
     parts = path.split(os.sep)
     for part in parts:
         if should_ignore(part) or part in ADDITIONAL_IGNORE_DIRS:
@@ -72,10 +69,7 @@ def classify_file(filename):
         return "other"
 
 def build_directory_tree(root):
-    """
-    Recursively build a directory tree with files classified by type,
-    ignoring directories or files that match ignore patterns or output files.
-    """
+    """Recursively build a directory tree with files classified by type."""
     tree = {"name": os.path.basename(root), "path": root, "type": "directory", "children": []}
     try:
         entries = os.listdir(root)
@@ -100,11 +94,7 @@ def build_directory_tree(root):
     return tree
 
 def extract_imports_from_file(file_path):
-    """
-    Extract import statements from a Python file.
-    For 'import' statements, return the module name.
-    For 'from ... import ...' statements, return the module.
-    """
+    """Extract import statements from a Python file."""
     imports = []
     try:
         with open(file_path, "r", encoding="utf-8") as f:
@@ -124,10 +114,7 @@ def extract_imports_from_file(file_path):
     return list(set(imports))
 
 def extract_config_loads(file_path):
-    """
-    Extract string literals that look like config filenames.
-    Looks for open() calls with a literal ending with .json, .yaml, or .yml.
-    """
+    """Extract string literals that look like config filenames from a file."""
     config_files = []
     try:
         with open(file_path, "r", encoding="utf-8") as f:
@@ -147,12 +134,13 @@ def extract_config_loads(file_path):
 
 def build_dependency_graph(root, directory_tree):
     """
-    Walk through the directory and build a mapping of each Python file to its imports and config loads.
-    Differentiates internal (project files) and external imports.
+    Build a dependency graph mapping each Python file to its internal and external imports,
+    and any config files it loads.
     """
     dependency_graph = {}  # {file_path: {"internal": [], "external": [], "configs": []}}
     internal_modules = {}  # module_name -> file_path
-    # First pass: Collect internal module names using dotted notation from relative paths.
+
+    # First pass: Collect internal module names.
     for subdir, dirs, files in os.walk(root):
         dirs[:] = [d for d in dirs if not should_ignore_path(os.path.join(subdir, d))]
         for file in files:
@@ -161,6 +149,7 @@ def build_dependency_graph(root, directory_tree):
                 rel_path = os.path.relpath(file_path, root)
                 module_name = os.path.splitext(rel_path)[0].replace(os.sep, ".")
                 internal_modules[module_name] = file_path
+
     # Second pass: Build the dependency graph.
     for subdir, dirs, files in os.walk(root):
         dirs[:] = [d for d in dirs if not should_ignore_path(os.path.join(subdir, d))]
@@ -174,7 +163,6 @@ def build_dependency_graph(root, directory_tree):
                 dependency_graph[file_path] = {"internal": [], "external": [], "configs": config_loads}
                 for imp in imports:
                     matched = False
-                    # Match against internal modules using dotted notation.
                     for mod_name in internal_modules.keys():
                         if mod_name == imp or mod_name.startswith(imp + "."):
                             dependency_graph[file_path]["internal"].append(mod_name)
@@ -186,10 +174,7 @@ def build_dependency_graph(root, directory_tree):
     return dependency_graph, internal_modules
 
 def read_requirements(root):
-    """
-    Read a requirements.txt file (if present) from the project root.
-    Returns a set of declared external libraries (in lowercase).
-    """
+    """Read requirements.txt from the project root, if present."""
     req_path = os.path.join(root, "requirements.txt")
     declared = set()
     if os.path.exists(req_path):
@@ -203,9 +188,7 @@ def read_requirements(root):
     return declared
 
 def aggregate_external_usage(dependency_graph):
-    """
-    Aggregate external libraries imported across all Python files.
-    """
+    """Aggregate external libraries imported across all Python files."""
     used = set()
     for file_path, deps in dependency_graph.items():
         for ext in deps["external"]:
@@ -213,10 +196,7 @@ def aggregate_external_usage(dependency_graph):
     return used
 
 def flatten_directory_tree(tree):
-    """
-    Flatten the directory tree into a list of file nodes.
-    Each node is a dict with keys: path, type.
-    """
+    """Flatten the directory tree into a list of file nodes."""
     files = []
     if tree["type"] != "directory":
         files.append(tree)
@@ -227,9 +207,7 @@ def flatten_directory_tree(tree):
 
 def generate_mermaid_diagram(dependency_graph, internal_modules, root, directory_tree):
     """
-    Generate a simplified Mermaid diagram.
-    Each node is a Python file (module) or a config file.
-    Draws edges from a file to an internal module it imports and from a file to a config file it loads.
+    Generate a simplified Mermaid diagram of internal dependencies and config loads.
     """
     lines = ["graph TD"]
     node_ids = {}
@@ -294,8 +272,7 @@ def generate_mermaid_diagram(dependency_graph, internal_modules, root, directory
 
 def generate_d3_data(dependency_graph, internal_modules, root, directory_tree):
     """
-    Convert the dependency graph into a D3-friendly JSON structure with "nodes" and "links".
-    Nodes are created for each Python file (module) and for config files.
+    Convert the dependency graph into a D3-friendly JSON structure with nodes and links.
     """
     nodes = []
     links = []
@@ -341,11 +318,8 @@ def generate_d3_data(dependency_graph, internal_modules, root, directory_tree):
     return {"nodes": nodes, "links": links}
 
 def generate_d3_html(d3_data, output_html):
-    """
-    Generate an HTML file that loads D3.js and displays a force-directed graph using d3_data.
-    """
-    html_template = f"""
-<!DOCTYPE html>
+    """Generate an HTML file that uses D3.js to display a force-directed graph."""
+    html_template = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -460,25 +434,31 @@ def generate_d3_html(d3_data, output_html):
     print(f"D3 HTML visualization written to {output_html}")
 
 def main():
-    # Interactive dialogue
-    project_path = input("Enter the path to your project folder: ").strip()
+    # Get command-line arguments.
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="Simplified Project Mapper: Provide --path and optionally --ignore-dir."
+    )
+    parser.add_argument("--path", required=True, help="Path to the project folder")
+    parser.add_argument("--ignore-dir", help="Comma-separated list of directory names to ignore")
+    args = parser.parse_args()
+
+    project_path = args.path.strip()
     if not os.path.isdir(project_path):
         print("The provided path does not exist or is not a directory.")
         return
+
+    if args.ignore_dir:
+        for d in args.ignore_dir.split(","):
+            ADDITIONAL_IGNORE_DIRS.add(d.strip())
+
     print(f"Outputs will be saved in the project folder: {project_path}")
-    
     base_name = input("Enter a base file name for outputs (without extension): ").strip()
-    # Generate output file names.
     json_output = os.path.join(project_path, f"{base_name}_ai.json")
     mermaid_output = os.path.join(project_path, f"{base_name}_mermaid.mmd")
     d3_output = os.path.join(project_path, f"{base_name}_d3.html")
-    
-    ignore_dirs_input = input("Enter comma-separated directory names to ignore (or leave blank): ").strip()
-    if ignore_dirs_input:
-        for d in ignore_dirs_input.split(","):
-            ADDITIONAL_IGNORE_DIRS.add(d.strip())
-    
-    # Build the mapping.
+
+    # Build mapping.
     directory_tree = build_directory_tree(project_path)
     dependency_graph, internal_modules = build_dependency_graph(project_path, directory_tree)
     declared_libs = read_requirements(project_path)
@@ -488,4 +468,26 @@ def main():
     
     report = {
         "directory_tree": directory_tree,
-        "dependency_
+        "dependency_graph": dependency_graph,
+        "environment": {
+            "declared_external_libs": list(declared_libs),
+            "used_external_libs": list(used_libs),
+            "missing_declaration": missing_declaration,
+            "unused_declaration": unused_declaration
+        }
+    }
+    
+    with open(json_output, "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=4)
+    print(f"JSON report written to {json_output}")
+
+    mermaid_code = generate_mermaid_diagram(dependency_graph, internal_modules, project_path, directory_tree)
+    with open(mermaid_output, "w", encoding="utf-8") as f:
+        f.write(mermaid_code)
+    print(f"Mermaid diagram written to {mermaid_output}")
+
+    d3_data = generate_d3_data(dependency_graph, internal_modules, project_path, directory_tree)
+    generate_d3_html(d3_data, d3_output)
+
+if __name__ == "__main__":
+    main()
